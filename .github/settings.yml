@@ -1,0 +1,2 @@
+_extends: .github:github-management/yara-rules.yml
+
