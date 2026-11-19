@@ -1,0 +1,104 @@
+import "pe"
+
+/*
+ * Family-hunting rule for the analyzed Windows AMD64 AdaptixC2 Beacon
+ * derivative. The rule deliberately avoids the carrier, C2 profile, RC4 key,
+ * API hashes, HTTP path, and control-flow-flattening dispatcher.
+ *
+ * The required protocol evidence is combined with thresholded SaveMemory,
+ * asynchronous-I/O, COFF/BOF, and derivative implementation evidence. A
+ * single generic BOF-loader or RC4 signature is intentionally insufficient.
+ */
+rule AdaptixC2_Beacon_Windows_AMD64_Generic
+{
+    meta:
+        author = "eSentire Threat Response Unit (TRU) | @jgajek"
+        description = "Detects Windows AMD64 AdaptixC2 Beacon derivatives using protocol and BOF workflow invariants"
+
+    strings:
+        /*
+         * Adaptix protocol anchors.
+         *
+         * COMMAND_SAVEMEMORY is 8993 (0x2321). COMMAND_ERROR is
+         * 0x1111ffff and is repeatedly serialized by independent handlers.
+         * The repeated call-site form makes a coincidental command constant
+         * insufficient while tolerating loss of several flattened handlers.
+         */
+        $proto_save_memory_id = { 21 23 00 00 }
+        $proto_error_emit = { BA FF FF 11 11 E8 ?? ?? ?? ?? }
+
+        /*
+         * SaveMemory argument workflow:
+         *     Unpack32, Unpack32, UnpackBytes, Unpack32
+         *
+         * Register nibbles and relative call targets are wildcarded.
+         */
+        $workflow_save_memory = {
+            4? 89 ?? E8 ?? ?? ?? ?? 89 C?
+            48 89 ?? E8 ?? ?? ?? ?? 89 C?
+            4? 8D ?? 24 ?? 4? C7 0? 00 00 00 00
+            48 89 ?? 4? 89 ?? E8 ?? ?? ?? ?? 4? 89 C?
+            48 89 ?? E8 ?? ?? ?? ??
+        }
+
+        /*
+         * Adaptix asynchronous pipe/process event 0x8437 serialized through
+         * the same response writer.
+         */
+        $workflow_async_event_8437 = {
+            BA 37 84 00 00 E8 ?? ?? ?? ??
+        }
+
+        /*
+         * The selected-entry lookup walks 18-byte COFF symbols and emits
+         * BOF diagnostic 260 when the requested symbol is absent.
+         */
+        $workflow_bof_missing_entry = {
+            48 83 C? 12 4? 39 ?? 7? ??
+            B9 04 01 00 00 31 D2
+        }
+
+        /*
+         * Adaptix's loader allocates a 4 KiB MEM_COMMIT|MEM_RESERVE|
+         * MEM_TOP_DOWN, PAGE_EXECUTE_READWRITE external-pointer workspace.
+         */
+        $workflow_bof_rwx_import_table = {
+            BA 00 10 00 00 31 C9
+            41 B8 00 30 10 00
+            41 B9 40 00 00 00
+        }
+
+        /*
+         * Optional derivative anchors. These strengthen matches when one
+         * family workflow was transformed by partial CFF obfuscation.
+         */
+        $derivative_peb_context_pair = {
+            65 48 8B 04 25 60 00 00 00
+            48 8B 80 60 03 00 00 C3
+            65 48 8B 04 25 60 00 00 00
+            48 89 88 60 03 00 00 C3
+        }
+
+        $derivative_big_endian_u32_writer = {
+            0F CE 89 34 08 83 07 04 83 47 10 04
+        }
+
+    condition:
+        uint16(0) == 0x5a4d and
+        pe.machine == pe.MACHINE_AMD64 and
+        filesize < 100MB and
+
+        #proto_error_emit >= 4 and
+
+        (
+            3 of ($workflow_*) or
+            (
+                $proto_save_memory_id and
+                2 of ($workflow_*)
+            ) or
+            (
+                2 of ($workflow_*) and
+                all of ($derivative_*)
+            )
+        )
+}
